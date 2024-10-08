@@ -1,0 +1,15 @@
+# requirements.txt
+
+# GUI Library
+PyQt5==5.15.9
+
+# Audio Processing
+sounddevice==0.4.5
+numpy==1.23.5
+
+# Machine Learning Models
+transformers==4.30.0
+datasets==2.9.0
+accelerate==0.20.3
+torch==2.0.0
+webrtcvad

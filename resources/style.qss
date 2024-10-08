@@ -1,0 +1,46 @@
+/* Main Window Styles */
+QMainWindow {
+    background-color: #ffffff;
+}
+
+QGroupBox {
+    font-size: 14px;
+    font-weight: bold;
+    margin-top: 10px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    padding: 10px;
+}
+
+QLabel {
+    color: #333333;
+}
+
+QPushButton {
+    background-color: #4CAF50;
+    color: white;
+    padding: 10px;
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+}
+
+QPushButton:disabled {
+    background-color: #a5d6a7;
+}
+
+QPushButton:hover:!disabled {
+    background-color: #45a049;
+}
+
+QComboBox {
+    padding: 5px;
+    font-size: 14px;
+}
+
+QTextEdit {
+    font-size: 14px;
+    border: 1px solid #cccccc;
+    border-radius: 5px;
+    padding: 10px;
+}
