@@ -181,6 +181,17 @@ class Ui_MainWindow(object):
         self.settingsLayout.setWidget(3, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("VAD Hop Size (seconds):"))
         self.settingsLayout.setWidget(3, QtWidgets.QFormLayout.FieldRole, self.vadHopSizeSpinBox)
 
+        # No Speech Threshold
+        self.noSpeechThresholdSpinBox = QtWidgets.QDoubleSpinBox(self.settingsGroupBox)
+        self.noSpeechThresholdSpinBox.setObjectName("noSpeechThresholdSpinBox")
+        self.noSpeechThresholdSpinBox.setDecimals(1)
+        self.noSpeechThresholdSpinBox.setSingleStep(0.1)
+        self.noSpeechThresholdSpinBox.setRange(0.1, 1.0)
+        self.noSpeechThresholdSpinBox.setValue(0.5)  # Default value
+        self.noSpeechThresholdSpinBox.setToolTip("Adjust the sensitivity for detecting the end of speech. Lower values make VAD less sensitive, higher values make it more sensitive.")
+        self.settingsLayout.setWidget(4, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("No Speech Threshold:"))
+        self.settingsLayout.setWidget(4, QtWidgets.QFormLayout.FieldRole, self.noSpeechThresholdSpinBox)
+
         self.verticalLayout.addWidget(self.settingsGroupBox)
 
         # Buttons layout
@@ -257,3 +268,4 @@ class Ui_MainWindow(object):
         self.chunkCountLabel.setText(_translate("MainWindow", "Segments in Queue: 0"))
         self.vadWindowSizeSpinBox.setSuffix(" s")
         self.vadHopSizeSpinBox.setSuffix(" s")
+        self.noSpeechThresholdSpinBox.setSuffix(" s")

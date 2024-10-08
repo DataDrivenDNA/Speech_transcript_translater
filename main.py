@@ -51,7 +51,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         self.translationArea.setReadOnly(True)
 
         # Queues for threading
-        self.audio_queue = queue.Queue(maxsize=10)  # Limit queue size to prevent memory issues
+        self.audio_queue = queue.Queue(maxsize=10)      # Limit queue size to prevent memory issues
         self.transcription_queue = queue.Queue()
         self.audio_frames_queue = queue.Queue(maxsize=100)
 
@@ -61,12 +61,14 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
         # Settings
         self.settings_lock = threading.Lock()
-        self.language = "auto"  # default language
+        self.language = "auto"          # default language
+        self.no_speech_threshold = 0.5  # default value, will be updated from UI
 
         # Connect settings controls
         self.languageComboBox.currentTextChanged.connect(self.update_language)
         self.vadWindowSizeSpinBox.valueChanged.connect(self.update_vad_window_size)
         self.vadHopSizeSpinBox.valueChanged.connect(self.update_vad_hop_size)
+        self.noSpeechThresholdSpinBox.valueChanged.connect(self.update_no_speech_threshold)
 
         # Initialize Silero VAD
         self.load_vad_model()
@@ -171,13 +173,24 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
     def update_vad_window_size(self, new_value):
         with self.settings_lock:
+            if new_value < self.vadHopSizeSpinBox.value():
+                # Adjust hop size to be less than or equal to window size
+                self.vadHopSizeSpinBox.setValue(new_value)
             self.vad_window_size = int(AUDIO_RATE * new_value)
             logging.info(f"VAD window size updated to {new_value} seconds ({self.vad_window_size} samples).")
 
     def update_vad_hop_size(self, new_value):
         with self.settings_lock:
+            if new_value > self.vadWindowSizeSpinBox.value():
+                # Adjust window size to be greater than or equal to hop size
+                self.vadWindowSizeSpinBox.setValue(new_value)
             self.vad_hop_size = int(AUDIO_RATE * new_value)
             logging.info(f"VAD hop size updated to {new_value} seconds ({self.vad_hop_size} samples).")
+
+    def update_no_speech_threshold(self, new_value):
+        with self.settings_lock:
+            self.no_speech_threshold = new_value
+            logging.info(f"No Speech Threshold updated to {new_value} seconds.")
 
     def start_transcription(self):
         if self.is_recording:
@@ -279,6 +292,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
                 with self.settings_lock:
                     current_language = self.language
+                    current_no_speech_threshold = self.no_speech_threshold
 
                 # Prepare generate_kwargs for transcription
                 transcribe_kwargs = {
@@ -288,8 +302,8 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                     "condition_on_prev_tokens": False,
                     "compression_ratio_threshold": 1.35,
                     "temperature": 0.0,
-                    "logprob_threshold": -1.0,   # Adjusted for better filtering
-                    "no_speech_threshold": 0.5,  # Adjusted for better VAD handling
+                    "logprob_threshold": -0.5,         # Adjusted for better filtering
+                    "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
                     "return_timestamps": True
                 }
 
@@ -329,8 +343,8 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                         "condition_on_prev_tokens": False,
                         "compression_ratio_threshold": 1.35,
                         "temperature": 0.0,
-                        "logprob_threshold": -0.5,   # Adjusted
-                        "no_speech_threshold": 0.5,  # Adjusted
+                        "logprob_threshold": -0.5,         # Adjusted
+                        "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
                         "return_timestamps": True
                     }
                     if current_language != "auto":
@@ -388,6 +402,9 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         # Wait for the transcription thread to finish
         if self.transcription_thread.is_alive():
             self.transcription_thread.join()
+
+        # Explicitly release GPU memory
+        torch.cuda.empty_cache()
 
         event.accept()
         logging.info("Shutdown sequence completed.")
