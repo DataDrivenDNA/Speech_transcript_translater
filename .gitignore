@@ -2,3 +2,4 @@ portaudio
 .mypy_cache
 __pycache__
 venv
+mainold.py

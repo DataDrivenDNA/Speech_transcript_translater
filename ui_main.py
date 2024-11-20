@@ -164,22 +164,33 @@ class Ui_MainWindow(object):
         self.vadWindowSizeSpinBox.setObjectName("vadWindowSizeSpinBox")
         self.vadWindowSizeSpinBox.setDecimals(1)
         self.vadWindowSizeSpinBox.setSingleStep(0.1)
-        self.vadWindowSizeSpinBox.setRange(0.5, 5.0)
+        self.vadWindowSizeSpinBox.setRange(0.05, 5.0)
         self.vadWindowSizeSpinBox.setValue(1.0)  # Default value
         self.vadWindowSizeSpinBox.setToolTip("Set the VAD window size in seconds.")
         self.settingsLayout.setWidget(2, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("VAD Window Size (seconds):"))
         self.settingsLayout.setWidget(2, QtWidgets.QFormLayout.FieldRole, self.vadWindowSizeSpinBox)
+
+        # Add Tooltip to VAD Window Size Label
+        self.settingsLayout.labelForField(self.vadWindowSizeSpinBox).setToolTip(
+            "The duration of the audio window that VAD analyzes to detect speech. "
+            "Larger window sizes may improve accuracy but increase latency."
+        )
 
         # VAD Hop Size
         self.vadHopSizeSpinBox = QtWidgets.QDoubleSpinBox(self.settingsGroupBox)
         self.vadHopSizeSpinBox.setObjectName("vadHopSizeSpinBox")
         self.vadHopSizeSpinBox.setDecimals(1)
         self.vadHopSizeSpinBox.setSingleStep(0.1)
-        self.vadHopSizeSpinBox.setRange(0.1, 2.5)
-        self.vadHopSizeSpinBox.setValue(0.5)  # Default value
+        self.vadHopSizeSpinBox.setRange(0.001, 2.5)
+        self.vadHopSizeSpinBox.setValue(0.1)  # Default value
         self.vadHopSizeSpinBox.setToolTip("Set the VAD hop size in seconds.")
         self.settingsLayout.setWidget(3, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("VAD Hop Size (seconds):"))
         self.settingsLayout.setWidget(3, QtWidgets.QFormLayout.FieldRole, self.vadHopSizeSpinBox)
+
+        # Add Tooltip to VAD Hop Size Label
+        self.settingsLayout.labelForField(self.vadHopSizeSpinBox).setToolTip(
+            "The step size between consecutive VAD windows. Smaller hop sizes can detect speech boundaries more accurately."
+        )
 
         # No Speech Threshold
         self.noSpeechThresholdSpinBox = QtWidgets.QDoubleSpinBox(self.settingsGroupBox)
@@ -187,10 +198,42 @@ class Ui_MainWindow(object):
         self.noSpeechThresholdSpinBox.setDecimals(1)
         self.noSpeechThresholdSpinBox.setSingleStep(0.1)
         self.noSpeechThresholdSpinBox.setRange(0.1, 1.0)
-        self.noSpeechThresholdSpinBox.setValue(0.5)  # Default value
+        self.noSpeechThresholdSpinBox.setValue(0.1)  # Default value
         self.noSpeechThresholdSpinBox.setToolTip("Adjust the sensitivity for detecting the end of speech. Lower values make VAD less sensitive, higher values make it more sensitive.")
         self.settingsLayout.setWidget(4, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("No Speech Threshold:"))
         self.settingsLayout.setWidget(4, QtWidgets.QFormLayout.FieldRole, self.noSpeechThresholdSpinBox)
+
+        # Add Tooltip to No Speech Threshold Label
+        self.settingsLayout.labelForField(self.noSpeechThresholdSpinBox).setToolTip(
+            "Determines how long the VAD should wait without detecting speech before considering the speech segment ended."
+        )
+
+        # Remove VAD Threshold and Energy Threshold Widgets
+        # ---------------------------------------------------
+        # The following code sections have been removed as they are no longer used.
+
+        # # VAD Threshold
+        # self.vadThresholdSpinBox = QtWidgets.QDoubleSpinBox(self.settingsGroupBox)
+        # self.vadThresholdSpinBox.setObjectName("vadThresholdSpinBox")
+        # self.vadThresholdSpinBox.setDecimals(2)
+        # self.vadThresholdSpinBox.setSingleStep(0.05)
+        # self.vadThresholdSpinBox.setRange(0.0, 1.0)
+        # self.vadThresholdSpinBox.setValue(0.5)  # Default value
+        # self.vadThresholdSpinBox.setToolTip("Adjust the VAD sensitivity. Higher values make VAD less sensitive.")
+        # self.settingsLayout.setWidget(5, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("VAD Threshold:"))
+        # self.settingsLayout.setWidget(5, QtWidgets.QFormLayout.FieldRole, self.vadThresholdSpinBox)
+
+        # # Energy Threshold
+        # self.energyThresholdSpinBox = QtWidgets.QDoubleSpinBox(self.settingsGroupBox)
+        # self.energyThresholdSpinBox.setObjectName("energyThresholdSpinBox")
+        # self.energyThresholdSpinBox.setDecimals(4)
+        # self.energyThresholdSpinBox.setSingleStep(0.001)
+        # self.energyThresholdSpinBox.setRange(0.0001, 1.0)
+        # self.energyThresholdSpinBox.setValue(0.01)  # Default value
+        # self.energyThresholdSpinBox.setToolTip("Set the minimum energy level to consider for speech detection.")
+        # self.settingsLayout.setWidget(6, QtWidgets.QFormLayout.LabelRole, QtWidgets.QLabel("Energy Threshold:"))
+        # self.settingsLayout.setWidget(6, QtWidgets.QFormLayout.FieldRole, self.energyThresholdSpinBox)
+        # ---------------------------------------------------
 
         self.verticalLayout.addWidget(self.settingsGroupBox)
 
@@ -269,3 +312,8 @@ class Ui_MainWindow(object):
         self.vadWindowSizeSpinBox.setSuffix(" s")
         self.vadHopSizeSpinBox.setSuffix(" s")
         self.noSpeechThresholdSpinBox.setSuffix(" s")
+        # Removed suffix settings for VAD Threshold and Energy Threshold since they are no longer present
+        # self.vadThresholdSpinBox.setSuffix("")
+        # self.energyThresholdSpinBox.setSuffix("")
+
+

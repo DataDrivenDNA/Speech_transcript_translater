@@ -1,6 +1,8 @@
 import sys
 import threading
 import queue
+from collections import deque
+from itertools import islice
 import sounddevice as sd
 import numpy as np
 import torch
@@ -12,12 +14,29 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox
 from PyQt5.QtCore import QTimer, Qt, QDateTime
 import warnings
 import logging
+import argparse
+import time
+
+# ------------------------ Logging Configuration ------------------------
+
+def configure_logging(verbose=False):
+    """
+    Configure logging settings.
+    
+    Args:
+        verbose (bool): If True, set logging level to DEBUG. Otherwise, INFO.
+    """
+    log_level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+# ------------------------ Import Dependencies ------------------------
 
 # Suppress DeprecationWarning for PyQt5 (Temporary Fix)
 warnings.filterwarnings("ignore", category=DeprecationWarning, module='PyQt5')
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # Suppress specific FutureWarnings temporarily
 warnings.filterwarnings("ignore", category=FutureWarning, message="Passing a tuple of past_key_values is deprecated")
@@ -28,14 +47,20 @@ from ui_main import Ui_MainWindow
 # Import Silero VAD
 from silero_vad import get_speech_timestamps, VADIterator, collect_chunks
 
-# Constants
+# ------------------------ Constants ------------------------
+
 AUDIO_RATE = 16000  # Whisper's expected sample rate
 CHANNELS = 1         # Mono audio
 FRAME_DURATION = 30  # Duration of a frame in ms (must be 10, 20, or 30)
+MAX_BUFFER_SIZE = AUDIO_RATE * 10  # Maximum buffer size (e.g., 10 seconds of audio)
 
+# VAD Sensitivity Parameters
+VAD_THRESHOLD = 0.5   # Lowered from default to increase sensitivity
+
+# ------------------------ Main Class ------------------------
 
 class RealTimeTranslator(QMainWindow, Ui_MainWindow):
-    def __init__(self):
+    def __init__(self, verbose=False):
         super().__init__()
         self.setupUi(self)
         self.setWindowTitle("Real-Time Transcription and Translation")
@@ -62,7 +87,10 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         # Settings
         self.settings_lock = threading.Lock()
         self.language = "auto"          # default language
-        self.no_speech_threshold = 0.5  # default value, will be updated from UI
+        self.no_speech_threshold = 0.1  # default value, will be updated from UI
+
+        # Initialize a separate lock for buffer management
+        self.buffer_lock = threading.Lock()
 
         # Connect settings controls
         self.languageComboBox.currentTextChanged.connect(self.update_language)
@@ -73,14 +101,37 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         # Initialize Silero VAD
         self.load_vad_model()
 
-        # Buffer to hold audio frames
-        self.audio_buffer = np.array([], dtype=np.float32)
+        # Buffer to hold audio frames using deque for optimized buffer management
+        self.audio_buffer = deque(maxlen=MAX_BUFFER_SIZE)  # Initialize deque with a maximum size
+
         # Initialize vad_window_size and vad_hop_size based on spin box defaults
-        self.vad_window_size = int(AUDIO_RATE * self.vadWindowSizeSpinBox.value())  # seconds to samples
-        self.vad_hop_size = int(AUDIO_RATE * self.vadHopSizeSpinBox.value())        # seconds to samples
+        self.vad_window_size_sec = self.vadWindowSizeSpinBox.value()  # in seconds
+        self.vad_hop_size_sec = self.vadHopSizeSpinBox.value()        # in seconds
+
+        self.vad_window_size = int(AUDIO_RATE * self.vad_window_size_sec)  # seconds to samples
+        self.vad_hop_size = int(AUDIO_RATE * self.vad_hop_size_sec)        # seconds to samples
+
+        # Define overlap (50% of window size)
+        self.overlap = int(self.vad_window_size * 0.5)
+        self.shift = self.vad_window_size - self.overlap
+
+        logging.info(f"Initial VAD window size: {self.vad_window_size_sec} sec ({self.vad_window_size} samples)")
+        logging.info(f"Initial VAD hop size: {self.vad_hop_size_sec} sec ({self.vad_hop_size} samples)")
+        logging.debug(f"Initial overlap: {self.overlap} samples")
+        logging.debug(f"Initial shift: {self.shift} samples")
 
         # Load models
         self.load_models()
+
+        # Post-Processing Parameters (in seconds)
+        self.post_merge_min_gap = 0.3      # Minimum gap to merge segments
+        self.post_smooth_padding = 0.05    # Padding to add to segment boundaries
+        self.post_min_duration = 0.3        # Minimum duration for speech segments
+
+        # Initialize threads
+        self.audio_thread = None
+        self.audio_processing_thread = None
+        self.transcription_thread = None
 
         # Start the transcription thread
         self.transcription_thread = threading.Thread(target=self.process_transcription, daemon=True)
@@ -105,10 +156,12 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
     def load_vad_model(self):
         logging.info("Loading Silero VAD model...")
-        self.vad_model, self.vad_utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                                        model='silero_vad',
-                                                        force_reload=False,
-                                                        onnx=False)
+        self.vad_model, self.vad_utils = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad',
+            model='silero_vad',
+            force_reload=False,
+            onnx=False  # Ensure VAD runs on CPU
+        )
         (self.get_speech_ts, self.save_audio, self.read_audio, self.VADIterator, self.collect_chunks) = self.vad_utils
         logging.info("Silero VAD model loaded.")
 
@@ -127,12 +180,12 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
             logging.info(f"cuDNN Version: {torch.backends.cudnn.version()}")
 
         # Load Whisper model for ASR with translation capability
-        asr_model_id = "openai/whisper-large-v3-turbo"
+        asr_model_id = "openai/whisper-large-v3-turbo" 
         try:
             self.asr_model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 asr_model_id,
                 torch_dtype=self.torch_dtype,
-                low_cpu_mem_usage=True,
+                # low_cpu_mem_usage=True,
                 use_safetensors=True,
                 trust_remote_code=True  # Ensure the repository is trusted
             ).to(self.device)
@@ -171,21 +224,30 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                 self.language = language if language else "auto"
             logging.info(f"Source language updated to {self.language}.")
 
-    def update_vad_window_size(self, new_value):
+    def update_vad_window_size(self, new_value_sec):
         with self.settings_lock:
-            if new_value < self.vadHopSizeSpinBox.value():
+            if new_value_sec < self.vadHopSizeSpinBox.value():
                 # Adjust hop size to be less than or equal to window size
-                self.vadHopSizeSpinBox.setValue(new_value)
-            self.vad_window_size = int(AUDIO_RATE * new_value)
-            logging.info(f"VAD window size updated to {new_value} seconds ({self.vad_window_size} samples).")
+                self.vadHopSizeSpinBox.setValue(new_value_sec)
+            self.vad_window_size_sec = new_value_sec
+            self.vad_window_size = int(AUDIO_RATE * self.vad_window_size_sec)
+            # Update overlap and shift based on new window size
+            self.overlap = int(self.vad_window_size * 0.5)
+            self.shift = self.vad_window_size - self.overlap
+            logging.info(f"VAD window size updated to {new_value_sec} sec ({self.vad_window_size} samples).")
+            logging.debug(f"Updated overlap: {self.overlap} samples")
+            logging.debug(f"Updated shift: {self.shift} samples")
 
-    def update_vad_hop_size(self, new_value):
+    def update_vad_hop_size(self, new_value_sec):
         with self.settings_lock:
-            if new_value > self.vadWindowSizeSpinBox.value():
+            if new_value_sec > self.vadWindowSizeSpinBox.value():
                 # Adjust window size to be greater than or equal to hop size
-                self.vadWindowSizeSpinBox.setValue(new_value)
-            self.vad_hop_size = int(AUDIO_RATE * new_value)
-            logging.info(f"VAD hop size updated to {new_value} seconds ({self.vad_hop_size} samples).")
+                self.vadWindowSizeSpinBox.setValue(new_value_sec)
+            self.vad_hop_size_sec = new_value_sec
+            self.vad_hop_size = int(AUDIO_RATE * self.vad_hop_size_sec)
+            # Update overlap and shift based on new hop size if needed
+            # (Overlap is already based on window size)
+            logging.info(f"VAD hop size updated to {new_value_sec} sec ({self.vad_hop_size} samples).")
 
     def update_no_speech_threshold(self, new_value):
         with self.settings_lock:
@@ -213,71 +275,208 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         logging.info("Stopped recording.")
 
         # Clear the audio queues safely
-        self.audio_queue = queue.Queue(maxsize=10)
-        self.audio_frames_queue = queue.Queue(maxsize=100)
-        self.audio_buffer = np.array([], dtype=np.float32)
+        with self.buffer_lock:
+            self.audio_queue = queue.Queue(maxsize=10)
+            self.audio_frames_queue = queue.Queue(maxsize=100)
+            self.audio_buffer = deque(maxlen=MAX_BUFFER_SIZE)  # Reset the deque buffer
+        logging.debug("Cleared audio_queue, audio_frames_queue, and reset audio_buffer.")
 
     def capture_audio(self):
+        """
+        Capture audio from the default input device using SoundDevice's InputStream.
+        This method runs in a separate thread to prevent blocking the main GUI thread.
+        """
         try:
-            with sd.RawInputStream(samplerate=AUDIO_RATE, blocksize=int(FRAME_DURATION * AUDIO_RATE / 1000),
-                                   dtype='int16', channels=CHANNELS, callback=self.audio_callback):
-                while self.is_recording:
+            # Define callback parameters
+            block_duration_ms = FRAME_DURATION  # Duration of each audio block in milliseconds
+            blocksize = int(AUDIO_RATE * block_duration_ms / 1000)
+            logging.debug(f"Audio capture blocksize set to {blocksize} samples (block_duration_ms={block_duration_ms}ms).")
+
+            # Define the stream configuration
+            stream = sd.InputStream(
+                samplerate=AUDIO_RATE,
+                blocksize=blocksize,
+                dtype='int16',
+                channels=CHANNELS,
+                callback=self.audio_callback,
+                latency='low'  # Set latency as low as possible for real-time processing
+            )
+
+            with stream:
+                logging.info("Audio stream opened successfully.")
+                while self.is_recording and not self.should_exit:
+                    # Use a small sleep to yield control and allow clean exit
                     sd.sleep(100)
         except Exception as e:
             logging.error(f"Audio capture error: {e}")
             self.is_recording = False
             self.startButton.setEnabled(True)
             self.stopButton.setEnabled(False)
-            QMessageBox.critical(self, "Error", f"Audio capture error: {e}")
+            QMessageBox.critical(self, "Audio Capture Error", f"An error occurred while capturing audio:\n{e}")
 
     def audio_callback(self, indata, frames, time_info, status):
+        """
+        Callback function called by sounddevice for each audio block.
+        """
         if not self.is_recording:
             return
 
         if status:
-            logging.warning(f"Audio status: {status}")
+            logging.warning(f"Audio Callback Status: {status}")
 
         try:
-            # Convert indata to bytes and enqueue
-            self.audio_frames_queue.put_nowait(bytes(indata))
-        except queue.Full:
-            logging.warning("Audio frames queue is full. Dropping audio frames.")
+            # Convert indata to float32 numpy array
+            audio_data = np.frombuffer(indata, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # Append audio data to deque buffer with buffer_lock
+            with self.buffer_lock:
+                self.audio_buffer.extend(audio_data)
+                # To prevent excessive logging, log buffer size at INFO level when a new block is added
+                logging.debug(f"Appended {len(audio_data)} samples to audio_buffer. Current size: {len(self.audio_buffer)}")
+
+            # Enqueue the audio frames for processing
+            try:
+                self.audio_frames_queue.put_nowait(audio_data)
+                # Remove or minimize DEBUG logs in high-frequency callbacks
+                # logging.debug(f"Enqueued {len(audio_data)} samples to audio_frames_queue.")
+            except queue.Full:
+                logging.warning("Audio frames queue is full. Dropping audio frames.")
+        except Exception as e:
+            logging.error(f"Unexpected error in audio_callback: {e}")
+
+    # -------------------- Post-Processing Methods --------------------
+    def merge_close_segments(self, speech_timestamps, min_gap=0.3):
+        """
+        Merge speech segments that are separated by less than min_gap seconds.
+
+        Args:
+            speech_timestamps (list): List of speech timestamp dictionaries with 'start' and 'end' in samples.
+            min_gap (float): Minimum gap in seconds to merge segments.
+
+        Returns:
+            list: Merged list of speech timestamp dictionaries.
+        """
+        if not speech_timestamps:
+            return []
+
+        merged_segments = [speech_timestamps[0]]
+        min_gap_samples = int(min_gap * AUDIO_RATE)
+
+        for current in speech_timestamps[1:]:
+            previous = merged_segments[-1]
+            gap = current['start'] - previous['end']
+            if gap <= min_gap_samples:
+                # Merge segments by extending the end of the previous segment
+                merged_segments[-1]['end'] = current['end']
+            else:
+                merged_segments.append(current)
+
+        return merged_segments
+
+    def smooth_boundaries(self, speech_timestamps, padding=0.05):
+        """
+        Smooth the boundaries of speech segments by adding padding.
+
+        Args:
+            speech_timestamps (list): List of speech timestamp dictionaries with 'start' and 'end' in samples.
+            padding (float): Padding in seconds to add to start and end.
+
+        Returns:
+            list: List of speech timestamp dictionaries with smoothed boundaries.
+        """
+        smoothed_segments = []
+        padding_samples = int(padding * AUDIO_RATE)
+
+        for ts in speech_timestamps:
+            start = max(0, ts['start'] - padding_samples)
+            end = ts['end'] + padding_samples
+            smoothed_segments.append({'start': start, 'end': end})
+
+        return smoothed_segments
+
+    def remove_short_segments(self, speech_timestamps, min_duration=0.3):
+        """
+        Remove speech segments that are shorter than min_duration seconds.
+
+        Args:
+            speech_timestamps (list): List of speech timestamp dictionaries with 'start' and 'end' in samples.
+            min_duration (float): Minimum duration in seconds.
+
+        Returns:
+            list: Filtered list of speech timestamp dictionaries.
+        """
+        filtered_segments = []
+        min_duration_samples = int(min_duration * AUDIO_RATE)
+
+        for ts in speech_timestamps:
+            duration = ts['end'] - ts['start']
+            if duration >= min_duration_samples:
+                filtered_segments.append(ts)
+
+        return filtered_segments
+    # -------------------- End of Post-Processing Methods --------------------
 
     def process_audio_frames(self):
         while not self.should_exit:
             try:
-                indata_bytes = self.audio_frames_queue.get(timeout=1)
-                # Convert bytes to numpy array
-                audio_data = np.frombuffer(indata_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                # Retrieve audio data from the queue (used as a signal)
+                self.audio_frames_queue.get(timeout=1)
+                # logging.debug("Retrieved audio data from audio_frames_queue.")
 
-                with self.settings_lock:
-                    # Append audio data to buffer
-                    self.audio_buffer = np.concatenate((self.audio_buffer, audio_data))
+                with self.buffer_lock:
+                    # Check if there's enough data in the buffer to process
+                    if len(self.audio_buffer) >= self.vad_window_size:
+                        # logging.debug(f"Buffer has {len(self.audio_buffer)} samples, processing {self.vad_window_size} samples.")
 
-                    # If we have enough data, process with VAD
-                    while len(self.audio_buffer) >= self.vad_window_size:
-                        # Prepare the audio chunk
-                        audio_chunk = self.audio_buffer[:self.vad_window_size]
-                        # Remove processed data from buffer
-                        self.audio_buffer = self.audio_buffer[self.vad_hop_size:]  # Move the window
+                        # Extract the first vad_window_size samples
+                        audio_chunk = list(islice(self.audio_buffer, self.vad_window_size))
+                        audio_chunk = np.array(audio_chunk, dtype=np.float32)
 
-                        # Convert to torch tensor
-                        audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0)
+                        # Convert to torch tensor and keep it on CPU (VAD is on CPU)
+                        audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0).to('cpu')  # Explicitly on CPU
 
-                        # Apply VAD
-                        speech_timestamps = self.get_speech_ts(audio_tensor, self.vad_model, sampling_rate=AUDIO_RATE)
+                        # Apply VAD with adjusted threshold
+                        speech_timestamps = self.get_speech_ts(
+                            audio_tensor,
+                            self.vad_model,
+                            sampling_rate=AUDIO_RATE,
+                            threshold=VAD_THRESHOLD  # Corrected parameter name
+                        )
+                        # logging.debug(f"VAD detected speech timestamps: {speech_timestamps}")
 
                         if speech_timestamps:
-                            # Speech detected, collect speech chunks
-                            speech_chunks = self.collect_chunks(speech_timestamps, audio_tensor)
+                            # Post-Processing Steps
+                            merged_timestamps = self.merge_close_segments(
+                                speech_timestamps,
+                                min_gap=self.post_merge_min_gap
+                            )
+                            smoothed_timestamps = self.smooth_boundaries(
+                                merged_timestamps,
+                                padding=self.post_smooth_padding
+                            )
+                            final_timestamps = self.remove_short_segments(
+                                smoothed_timestamps,
+                                min_duration=self.post_min_duration
+                            )
+                            # logging.debug(f"Post-processed speech timestamps: {final_timestamps}")
+
+                            # Collect speech chunks based on post-processed timestamps
+                            speech_chunks = self.collect_chunks(final_timestamps, audio_tensor)
                             for chunk in speech_chunks:
                                 # Convert chunk to numpy array
-                                speech_np = chunk.squeeze().numpy()
+                                speech_np = chunk.squeeze().cpu().numpy()
                                 try:
                                     self.audio_queue.put_nowait(speech_np)
-                                    logging.info("Speech segment added to queue.")
+                                    logging.info("Speech segment added to queue after post-processing.")
                                 except queue.Full:
                                     logging.warning("Audio queue is full. Dropping speech segment.")
+
+                        # Efficiently remove shift samples from the front of the buffer to maintain overlap
+                        if self.shift > 0:
+                            remaining_samples = list(islice(self.audio_buffer, self.shift, len(self.audio_buffer)))
+                            self.audio_buffer = deque(remaining_samples, maxlen=MAX_BUFFER_SIZE)
+                            # logging.debug(f"Removed {self.shift} samples from audio_buffer. New size: {len(self.audio_buffer)}")
+
             except queue.Empty:
                 continue
             except Exception as e:
@@ -289,6 +488,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
             try:
                 # Get audio to process
                 audio_to_process = self.audio_queue.get(timeout=1)
+                logging.debug(f"Retrieved speech segment of {len(audio_to_process)} samples from audio_queue.")
 
                 with self.settings_lock:
                     current_language = self.language
@@ -298,12 +498,12 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                 transcribe_kwargs = {
                     "task": "transcribe",
                     "max_new_tokens": 440,
-                    "num_beams": 3,
-                    "condition_on_prev_tokens": False,
+                    "num_beams": 4,
+                    "condition_on_prev_tokens": True,
                     "compression_ratio_threshold": 1.35,
                     "temperature": 0.0,
                     "logprob_threshold": -0.5,         # Adjusted for better filtering
-                    "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
+                   # "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
                     "return_timestamps": True
                 }
 
@@ -316,7 +516,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                     sampling_rate=AUDIO_RATE,
                     return_tensors="pt",
                     return_attention_mask=True
-                ).to(self.device, dtype=self.torch_dtype)
+                ).to(self.device, dtype=self.torch_dtype)  # Move to GPU or CPU as per device
 
                 input_features = inputs.input_features
                 attention_mask = inputs.attention_mask
@@ -339,12 +539,12 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                     translate_kwargs = {
                         "task": "translate",
                         "max_new_tokens": 440,
-                        "num_beams": 1,
+                        "num_beams": 3,
                         "condition_on_prev_tokens": False,
                         "compression_ratio_threshold": 1.35,
                         "temperature": 0.0,
-                        "logprob_threshold": -0.5,         # Adjusted
-                        "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
+                        "logprob_threshold": -1.0,         # Adjusted
+                       # "no_speech_threshold": current_no_speech_threshold,  # Updated parameter
                         "return_timestamps": True
                     }
                     if current_language != "auto":
@@ -362,6 +562,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
                 # Put the transcription and translation into the queue
                 self.transcription_queue.put((transcription, translation))
+                logging.debug("Placed transcription and translation into transcription_queue.")
 
             except queue.Empty:
                 continue
@@ -392,30 +593,44 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         self.should_exit = True
 
         # Wait for the audio thread to finish
-        if hasattr(self, 'audio_thread') and self.audio_thread.is_alive():
-            self.audio_thread.join()
+        if self.audio_thread and self.audio_thread.is_alive():
+            self.audio_thread.join(timeout=1)
+            logging.debug("Audio thread has been terminated.")
 
         # Wait for the audio processing thread to finish
-        if hasattr(self, 'audio_processing_thread') and self.audio_processing_thread.is_alive():
-            self.audio_processing_thread.join()
+        if self.audio_processing_thread and self.audio_processing_thread.is_alive():
+            self.audio_processing_thread.join(timeout=1)
+            logging.debug("Audio processing thread has been terminated.")
 
         # Wait for the transcription thread to finish
-        if self.transcription_thread.is_alive():
-            self.transcription_thread.join()
+        if self.transcription_thread and self.transcription_thread.is_alive():
+            self.transcription_thread.join(timeout=1)
+            logging.debug("Transcription thread has been terminated.")
 
         # Explicitly release GPU memory
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         event.accept()
         logging.info("Shutdown sequence completed.")
 
+# ------------------------ Entry Point ------------------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Real-Time Transcription and Translation Application")
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Enable verbose (DEBUG) logging.'
+    )
+    args = parser.parse_args()
+
+    configure_logging(verbose=args.verbose)
+
     app = QApplication(sys.argv)
-    window = RealTimeTranslator()
+    window = RealTimeTranslator(verbose=args.verbose)
     window.show()
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     main()
