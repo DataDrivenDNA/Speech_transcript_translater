@@ -4,7 +4,8 @@
 
 This project is a **real-time speech transcription and translation application** developed using **Python**. It leverages advanced machine learning models and provides a user-friendly interface for capturing audio, transcribing speech, and translating it into English in real-time.
 
-![Application Screenshot](resources/screenshot.png)
+**Note**: This is currently a conceptual project and contains known bugs. It serves as a demonstration and requires additional development for production use.
+
 
 ## Key Features
 
@@ -122,11 +123,5 @@ This project is a **real-time speech transcription and translation application**
 - **Performance Optimization**: Optimized resource usage for real-time processing requirements.
 - **Problem-Solving**: Addressed and resolved challenges related to audio processing and model integration.
 
-
-## License
-
-This project is licensed under the [MIT License](LICENSE).
-
----
 
 *Published as part of a portfolio to showcase expertise in machine learning, real-time systems, and software development.*
