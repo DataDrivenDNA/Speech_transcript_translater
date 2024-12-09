@@ -416,19 +416,25 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                                 merged_timestamps,
                                 padding=self.post_smooth_padding
                             )
+                            
                             final_timestamps = self.remove_short_segments(
                                 smoothed_timestamps,
                                 min_duration=self.post_min_duration
                             )
 
-                            speech_chunks = self.collect_chunks(final_timestamps, audio_tensor)
-                            for chunk in speech_chunks:
-                                speech_np = chunk.squeeze().cpu().numpy()
-                                try:
-                                    self.audio_queue.put_nowait(speech_np)
-                                    logging.info("Speech segment added to queue after post-processing.")
-                                except queue.Full:
-                                    logging.warning("Audio queue is full. Dropping speech segment.")
+                            if final_timestamps:  # Check if non-empty
+                                speech_chunks = self.collect_chunks(final_timestamps, audio_tensor)
+                                for chunk in speech_chunks:
+                                    speech_np = chunk.squeeze().cpu().numpy()
+                                    try:
+                                        self.audio_queue.put_nowait(speech_np)
+                                        logging.info("Speech segment added to queue after post-processing.")
+                                    except queue.Full:
+                                        logging.warning("Audio queue is full. Dropping speech segment.")
+                            else:
+                                # No segments detected, skip collecting chunks.
+                                logging.debug("No final timestamps detected, skipping chunk collection.")
+
 
                         # Remove shift samples
                         if self.shift > 0:
