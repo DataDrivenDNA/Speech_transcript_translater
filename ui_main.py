@@ -255,6 +255,13 @@ class Ui_MainWindow(object):
         self.stopButton.setToolTip("Stop real-time transcription and translation.")
         self.buttonsLayout.addWidget(self.stopButton)
 
+        # Caption Window Button
+        self.captionButton = QtWidgets.QPushButton(self.centralwidget)
+        self.captionButton.setObjectName("captionButton")
+        self.captionButton.setAccessibleName("Toggle Caption Window")
+        self.captionButton.setToolTip("Show/hide floating caption window")
+        self.buttonsLayout.addWidget(self.captionButton)
+
         self.verticalLayout.addLayout(self.buttonsLayout)
 
         # Transcription Area
@@ -306,6 +313,7 @@ class Ui_MainWindow(object):
         self.titleLabel.setText(_translate("MainWindow", "Real-Time Transcription and Translation"))
         self.startButton.setText(_translate("MainWindow", "Start"))
         self.stopButton.setText(_translate("MainWindow", "Stop"))
+        self.captionButton.setText(_translate("MainWindow", "Show Captions"))
         self.transcriptionLabel.setText(_translate("MainWindow", "Transcription:"))
         self.translationLabel.setText(_translate("MainWindow", "Translation:"))
         self.chunkCountLabel.setText(_translate("MainWindow", "Segments in Queue: 0"))

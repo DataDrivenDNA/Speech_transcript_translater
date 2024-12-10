@@ -16,6 +16,7 @@ import warnings
 import logging
 import argparse
 import time
+from caption_window import CaptionWindow
 
 # ------------------------ Logging Configuration ------------------------
 
@@ -173,6 +174,11 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         # Add processed segments tracking
         self.processed_segments = []
         self.processed_segments_lock = threading.Lock()
+
+        # Initialize caption window
+        self.caption_window = CaptionWindow()
+        self.caption_window_visible = False
+        self.captionButton.clicked.connect(self.toggle_caption_window)
 
     def load_stylesheet(self):
         try:
@@ -366,6 +372,8 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
     def process_audio_frames(self):
         current_speech_buffer = []
         speech_start_time = None
+        last_cleanup_time = time.time()
+        cleanup_interval = 5  # Cleanup every 5 seconds
         
         while not self.should_exit:
             if not self.is_recording:
@@ -374,9 +382,48 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
             try:
                 self.audio_frames_queue.get(timeout=1)
+                current_time = time.time()
+
+                # Periodic cleanup of old data
+                if current_time - last_cleanup_time > cleanup_interval:
+                    with self.buffer_lock:
+                        # Clear old data from audio buffer
+                        if len(self.audio_buffer) > MAX_BUFFER_SIZE:
+                            excess = len(self.audio_buffer) - MAX_BUFFER_SIZE
+                            for _ in range(excess):
+                                self.audio_buffer.popleft()
+                            logging.debug(f"Cleaned up {excess} samples from audio buffer")
+
+                    # Clear old processed segments
+                    with self.processed_segments_lock:
+                        cleanup_time = current_time - 30  # Keep last 30 seconds
+                        original_count = len(self.processed_segments)
+                        self.processed_segments = [
+                            ps for ps in self.processed_segments 
+                            if ps.end_time > cleanup_time
+                        ]
+                        removed_count = original_count - len(self.processed_segments)
+                        if removed_count > 0:
+                            logging.debug(f"Cleaned up {removed_count} old processed segments")
+
+                    # Clear old items from queues if they're getting too full
+                    while self.audio_queue.qsize() > 10:  # Keep last 10 items
+                        try:
+                            self.audio_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    while self.audio_frames_queue.qsize() > 50:  # Keep last 50 frames
+                        try:
+                            self.audio_frames_queue.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    last_cleanup_time = current_time
+                    logging.debug("Completed periodic cleanup of audio data")
+
                 with self.buffer_lock:
                     if len(self.audio_buffer) >= self.vad_window_size:
-                        current_time = time.time()
                         audio_chunk = list(islice(self.audio_buffer, 0, self.vad_window_size))
                         audio_chunk = np.array(audio_chunk, dtype=np.float32)
                         audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0).to('cpu')
@@ -426,13 +473,6 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                                             ))
                                             self.processed_segments.append(segment)
                                             logging.info("Processed complete speech segment")
-                                            
-                                            # Clean up old processed segments (older than 30 seconds)
-                                            cleanup_time = current_time - 30
-                                            self.processed_segments = [
-                                                ps for ps in self.processed_segments 
-                                                if ps.end_time > cleanup_time
-                                            ]
                                         except queue.Full:
                                             logging.warning("Audio queue is full. Dropping speech segment.")
                                     else:
@@ -568,15 +608,16 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
 
     def update_ui(self):
-        # Update transcription and translation areas
         while not self.transcription_queue.empty():
             transcription, translation = self.transcription_queue.get()
             timestamp = QDateTime.currentDateTime().toString("hh:mm:ss")
             if transcription:
                 new_transcription = transcription.strip()
-                # Simplified deduplication logic
                 if new_transcription and new_transcription != self.last_transcription:
+                    # Update main window
                     self.transcriptionArea.append(f"[{timestamp}] {new_transcription}")
+                    # Update caption window
+                    self.caption_window.update_text(new_transcription)
                     self.last_transcription = new_transcription
                 else:
                     logging.debug("Duplicate transcription detected. Skipping display.")
@@ -615,8 +656,21 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+        # Close caption window
+        self.caption_window.close()
+
         event.accept()
         logging.info("Shutdown sequence completed.")
+
+    def toggle_caption_window(self):
+        """Toggle the visibility of the caption window"""
+        if self.caption_window_visible:
+            self.caption_window.hide()
+            self.captionButton.setText("Show Captions")
+        else:
+            self.caption_window.show()
+            self.captionButton.setText("Hide Captions")
+        self.caption_window_visible = not self.caption_window_visible
 
 
 
