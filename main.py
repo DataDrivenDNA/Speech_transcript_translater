@@ -452,8 +452,21 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                 continue
 
     def process_transcription(self):
+        def find_largest_overlap(partial: str, final: str) -> int:
+            """
+            Find the length of the largest case-insensitive suffix of 'partial'
+            that is a prefix of 'final'.
+            """
+            partial_lower = partial.lower()
+            final_lower = final.lower()
+            max_overlap = 0
+            for i in range(min(len(partial), len(final)), 0, -1):
+                if final_lower.startswith(partial_lower[-i:]):
+                    max_overlap = i
+                    break
+            return max_overlap
+
         previous_partial = ""
-        
         while not self.should_exit:
             if not self.is_recording:
                 time.sleep(0.1)
@@ -461,12 +474,12 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
             try:
                 audio_to_process, is_complete, start_time, end_time = self.audio_queue.get(timeout=1)
-                logging.debug(f"Retrieved speech segment of {len(audio_to_process)} samples from audio_queue.")
+                logging.debug("Retrieved speech segment from audio_queue.")
 
                 with self.settings_lock:
                     current_language = self.language
 
-                # Prepare generate_kwargs for transcription
+                # Prepare ASR generation kwargs
                 transcribe_kwargs = {
                     "task": "transcribe",
                     "max_new_tokens": 440,
@@ -477,7 +490,6 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                     "logprob_threshold": -1.0,
                     "return_timestamps": True
                 }
-
                 if current_language != "auto":
                     transcribe_kwargs["language"] = current_language
 
@@ -498,19 +510,24 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                         **transcribe_kwargs
                     )
                     transcription = self.asr_processor.batch_decode(
-                        generated_ids, skip_special_tokens=True)[0].strip()
-                    
-                    # Handle partial vs complete transcriptions
+                        generated_ids, skip_special_tokens=True
+                    )[0].strip()
+
                     if not is_complete:
+                        # For partial transcripts, store the raw transcription
+                        # without ellipses for future overlap checking
                         previous_partial = transcription
-                        transcription += " ..."  # Add ellipsis to indicate partial transcription
+                        display_transcription = transcription + " ..."
                     else:
-                        # If there was a previous partial transcription, compare and correct
-                        if previous_partial and transcription.startswith(previous_partial):
-                            transcription = transcription[len(previous_partial):].strip()
+                        # For complete transcripts, try to remove overlapping text
+                        if previous_partial:
+                            overlap_len = find_largest_overlap(previous_partial, transcription)
+                            # Remove the overlapping portion from the final transcription
+                            transcription = transcription[overlap_len:].strip()
+                        display_transcription = transcription
                         previous_partial = ""
 
-                    logging.info(f"Transcription ({'complete' if is_complete else 'partial'}): {transcription}")
+                    logging.info(f"Transcription ({'complete' if is_complete else 'partial'}): {display_transcription}")
 
                 translation = ""
                 if current_language not in ["en", "auto"] and is_complete:
@@ -535,10 +552,11 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                             **translate_kwargs
                         )
                         translation = self.asr_processor.batch_decode(
-                            translation_ids, skip_special_tokens=True)[0].strip()
+                            translation_ids, skip_special_tokens=True
+                        )[0].strip()
                         logging.info(f"Translation: {translation}")
 
-                self.transcription_queue.put((transcription, translation))
+                self.transcription_queue.put((display_transcription, translation))
                 logging.debug("Placed transcription and translation into transcription_queue.")
 
             except queue.Empty:
@@ -547,6 +565,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                 error_message = f"[Error in transcription]: {e}"
                 logging.error(f"Transcription processing error: {e}")
                 self.transcription_queue.put((error_message, ""))
+
 
     def update_ui(self):
         # Update transcription and translation areas
