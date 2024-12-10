@@ -53,10 +53,14 @@ from silero_vad import get_speech_timestamps, VADIterator, collect_chunks
 AUDIO_RATE = 16000  # Whisper's expected sample rate
 CHANNELS = 1         # Mono audio
 FRAME_DURATION = 30  # Duration of a frame in ms (must be 10, 20, or 30)
-MAX_BUFFER_SIZE = AUDIO_RATE * 30  # Maximum buffer size (e.g., 10 seconds of audio)
+MAX_BUFFER_SIZE = AUDIO_RATE * 30  # Maximum buffer size (e.g., 30 seconds of audio)
 
 # VAD Sensitivity Parameters
-VAD_THRESHOLD = 0.5   # Could be tuned
+VAD_CHUNK_SIZE = 512  # Silero VAD expects 512 samples for 16kHz audio
+VAD_THRESHOLD = 0.3  # Lower threshold for more sensitive speech detection
+MIN_SILENCE_DURATION = 0.2  # Minimum silence duration to consider a sentence break (in seconds)
+MIN_SPEECH_DURATION = 0.3  # Minimum speech duration to consider valid speech (in seconds)
+MAX_SENTENCE_DURATION = 10.0  # Maximum duration for a single sentence (in seconds)
 
 # Post-Processing Parameters (in seconds)
 POST_MIN_DURATION = 0.5
@@ -77,6 +81,16 @@ class ProcessedSegment:
 
     def overlaps_with(self, other):
         return not (self.end_time < other.start_time or self.start_time > other.end_time)
+
+def samples_to_seconds(samples):
+    return samples / AUDIO_RATE
+
+def seconds_to_samples(seconds):
+    return int(seconds * AUDIO_RATE)
+
+def chunk_audio(audio_data, chunk_size=VAD_CHUNK_SIZE):
+    """Split audio data into chunks of specified size."""
+    return [audio_data[i:i + chunk_size] for i in range(0, len(audio_data), chunk_size)]
 
 # ------------------------ Main Class ------------------------
 
@@ -371,7 +385,9 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
 
     def process_audio_frames(self):
         current_speech_buffer = []
+        silence_buffer = []
         speech_start_time = None
+        in_speech = False
         last_cleanup_time = time.time()
         cleanup_interval = 5  # Cleanup every 5 seconds
         
@@ -381,7 +397,7 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                 continue
 
             try:
-                self.audio_frames_queue.get(timeout=1)
+                audio_frame = self.audio_frames_queue.get(timeout=1)
                 current_time = time.time()
 
                 # Periodic cleanup of old data
@@ -423,67 +439,83 @@ class RealTimeTranslator(QMainWindow, Ui_MainWindow):
                     logging.debug("Completed periodic cleanup of audio data")
 
                 with self.buffer_lock:
-                    if len(self.audio_buffer) >= self.vad_window_size:
-                        audio_chunk = list(islice(self.audio_buffer, 0, self.vad_window_size))
-                        audio_chunk = np.array(audio_chunk, dtype=np.float32)
-                        audio_tensor = torch.from_numpy(audio_chunk).unsqueeze(0).to('cpu')
-
-                        speech_timestamps = self.get_speech_ts(
-                            audio_tensor,
-                            self.vad_model,
-                            sampling_rate=AUDIO_RATE,
-                            threshold=VAD_THRESHOLD
-                        )
-
-                        if speech_timestamps:
-                            if speech_start_time is None:
-                                speech_start_time = current_time
+                    if len(self.audio_buffer) >= VAD_CHUNK_SIZE:
+                        # Process audio in VAD-compatible chunks
+                        audio_data = list(islice(self.audio_buffer, 0, self.vad_window_size))
+                        audio_chunks = chunk_audio(audio_data)
+                        
+                        # Track speech probability for the window
+                        speech_probs = []
+                        for chunk in audio_chunks:
+                            if len(chunk) == VAD_CHUNK_SIZE:  # Only process complete chunks
+                                chunk = np.array(chunk, dtype=np.float32)
+                                audio_tensor = torch.from_numpy(chunk).unsqueeze(0).to('cpu')
+                                speech_prob = self.vad_model(audio_tensor, AUDIO_RATE).item()
+                                speech_probs.append(speech_prob)
+                        
+                        # Consider it speech if the average probability exceeds threshold
+                        if speech_probs:
+                            avg_speech_prob = sum(speech_probs) / len(speech_probs)
+                            is_speech = avg_speech_prob > VAD_THRESHOLD
                             
-                            current_speech_buffer.extend(audio_chunk)
+                            if is_speech and not in_speech:
+                                # Speech start detected
+                                if len(silence_buffer) > 0:
+                                    silence_buffer = []
+                                if speech_start_time is None:
+                                    speech_start_time = current_time
+                                in_speech = True
+                                current_speech_buffer.extend(audio_data)
                             
-                            if len(current_speech_buffer) >= MAX_CONTINUOUS_SAMPLES:
-                                speech_segment = np.array(current_speech_buffer[:MAX_CONTINUOUS_SAMPLES], dtype=np.float32)
-                                try:
-                                    self.audio_queue.put_nowait((speech_segment, False, speech_start_time, current_time))
-                                    logging.info("Processed first 3 seconds of continuous speech")
-                                except queue.Full:
-                                    logging.warning("Audio queue is full. Dropping speech segment.")
+                            elif is_speech and in_speech:
+                                # Continuing speech
+                                current_speech_buffer.extend(audio_data)
                                 
-                                current_speech_buffer = current_speech_buffer[MAX_CONTINUOUS_SAMPLES:]
-                        else:
-                            if current_speech_buffer and speech_start_time is not None:
-                                speech_segment = np.array(current_speech_buffer, dtype=np.float32)
-                                
-                                # Check if segment has already been processed
-                                segment = ProcessedSegment(speech_start_time, current_time, speech_segment)
-                                
-                                with self.processed_segments_lock:
-                                    is_duplicate = any(
-                                        ps.hash == segment.hash 
-                                        for ps in self.processed_segments
-                                    )
+                                # Check if we've exceeded max sentence duration
+                                if len(current_speech_buffer) >= seconds_to_samples(MAX_SENTENCE_DURATION):
+                                    speech_segment = np.array(current_speech_buffer, dtype=np.float32)
+                                    try:
+                                        self.audio_queue.put_nowait((
+                                            speech_segment,
+                                            True,  # Mark as complete
+                                            speech_start_time,
+                                            current_time
+                                        ))
+                                    except queue.Full:
+                                        logging.warning("Audio queue is full. Dropping speech segment.")
                                     
-                                    if not is_duplicate:
+                                    # Reset buffers
+                                    current_speech_buffer = []
+                                    speech_start_time = current_time
+                            
+                            elif not is_speech and in_speech:
+                                # Potential speech end - accumulate silence
+                                silence_buffer.extend(audio_data)
+                                
+                                if samples_to_seconds(len(silence_buffer)) >= MIN_SILENCE_DURATION:
+                                    # Confirmed sentence break
+                                    if samples_to_seconds(len(current_speech_buffer)) >= MIN_SPEECH_DURATION:
+                                        speech_segment = np.array(current_speech_buffer, dtype=np.float32)
                                         try:
                                             self.audio_queue.put_nowait((
-                                                speech_segment, 
-                                                True, 
-                                                speech_start_time, 
-                                                current_time
+                                                speech_segment,
+                                                True,  # Mark as complete
+                                                speech_start_time,
+                                                current_time - samples_to_seconds(len(silence_buffer))
                                             ))
-                                            self.processed_segments.append(segment)
-                                            logging.info("Processed complete speech segment")
                                         except queue.Full:
                                             logging.warning("Audio queue is full. Dropping speech segment.")
-                                    else:
-                                        logging.debug("Skipping duplicate speech segment")
+                                    
+                                    # Reset all buffers
+                                    current_speech_buffer = []
+                                    silence_buffer = []
+                                    speech_start_time = None
+                                    in_speech = False
                             
-                            current_speech_buffer = []
-                            speech_start_time = None
-
-                        if self.shift > 0:
-                            remaining_samples = list(islice(self.audio_buffer, self.shift, len(self.audio_buffer)))
-                            self.audio_buffer = deque(remaining_samples, maxlen=MAX_BUFFER_SIZE)
+                            # Remove processed audio from buffer
+                            if self.shift > 0:
+                                remaining_samples = list(islice(self.audio_buffer, self.shift, len(self.audio_buffer)))
+                                self.audio_buffer = deque(remaining_samples, maxlen=MAX_BUFFER_SIZE)
 
             except queue.Empty:
                 continue
