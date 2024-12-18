@@ -53,7 +53,7 @@ This project is a **real-time speech transcription and translation application**
 1. **Clone the Repository**
 
    ```bash
-   git clone https://github.com/yourusername/real-time-transcription.git
+   git clone https://github.com/DataDrivenDNA/real-time-transcription.git
    cd real-time-transcription
    ```
 
